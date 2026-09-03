@@ -359,6 +359,10 @@ function voxelize(brushes, LO, HI, dims, opt, resolver, NODRAW_MAT) {
     let mi = matIds.get(b.material);
     if (mi === undefined) { mi = materials.length; materials.push(b.material); matIds.set(b.material, mi); }
 
+    // Brushes carry half-space planes; other sources (oriented primitives,
+    // meshes) can supply their own containment test instead.
+    const test = b.test || ((p) => inside(b.planes, p, 0.01));
+
     const bx0 = Math.max(0, Math.floor((b.lo[0] - LO[0]) / S));
     const bx1 = Math.min(width - 1, Math.ceil((b.hi[0] - LO[0]) / S));
     const by0 = Math.max(0, Math.floor((b.lo[2] - LO[2]) / S));
@@ -376,8 +380,8 @@ function voxelize(brushes, LO, HI, dims, opt, resolver, NODRAW_MAT) {
           let lo = 0, up = 0;
           for (let k = 0; k < 4; k++) {
             const dx = (k & 1) ? q : -q, dy = (k & 2) ? q : -q;
-            if (inside(b.planes, [cxw + dx, cyw + dy, czw - q], 0.01)) lo |= 1 << k;
-            if (inside(b.planes, [cxw + dx, cyw + dy, czw + q], 0.01)) up |= 1 << k;
+            if (test([cxw + dx, cyw + dy, czw - q])) lo |= 1 << k;
+            if (test([cxw + dx, cyw + dy, czw + q])) up |= 1 << k;
           }
           if (!lo && !up) continue;
 
