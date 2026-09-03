@@ -502,3 +502,97 @@ brushes are dropped as the outer shell. Override with `--tools` and `--sky`.
 - **Models and static meshes are ignored** — `misc_model`, CoD's XModels. CoD4
   and later lean on these heavily, so they convert less completely than CoD1/2.
 - **Brush entities become static**, wherever they sat when the map was saved.
+
+---
+
+# rbxl2mc
+
+Roblox places and models (`.rbxlx` / `.rbxmx`) into a Minecraft schematic.
+
+```bash
+node rbxl2mc.js MyPlace.rbxlx --info
+node rbxl2mc.js MyPlace.rbxlx --scale 1 --out place.schematic
+```
+
+Requires `vmf2mc.js` and `mc2source.js` alongside it.
+
+## Not brushes: oriented primitives
+
+Every other converter here reads brushes — convex volumes defined by half-space
+planes. Roblox has none. A place is a tree of Instances whose geometry is
+oriented primitives: a `Part` has a `Size`, a `CFrame` (position plus a 3x3
+rotation matrix) and a `Shape`.
+
+So instead of intersecting planes, each part supplies its own **containment
+test**: a sample point is transformed into the part's local space by the
+transposed rotation, where the test collapses to `|x| <= sx/2` for a block,
+`x²+y²+z² <= r²` for a ball, and a single linear inequality for a wedge. The
+shared voxelizer gained a `test` hook for this; the four brush-based converters
+produce byte-identical output as before.
+
+Rotation is the norm in Roblox rather than the exception, which makes the
+8-subsample-per-cell machinery matter far more here than it did for
+axis-aligned Source and Quake geometry.
+
+Roblox is also Y-up where the voxelizer is Z-up, so axes are swapped once at the
+part boundary and nowhere else.
+
+## Colour instead of texture names
+
+The other converters match blocks from texture *names* — keyword rules over
+strings like `textures/gothic_floor/xstep`. Roblox parts carry real RGB, so this
+does nearest-colour matching in **Oklab**, a perceptual space. Plain RGB
+Euclidean distance mismatches dark and saturated colours badly.
+
+`Material` constrains the palette family before matching, so a wooden part
+cannot match to bright wool on hue alone, and `Neon` goes straight to glowstone.
+
+```
+baseplate grey  rgb(163,162,165) -> light_gray_wool
+brick red       rgb(196,40,28)   -> red_wool
+beam yellow     rgb(245,205,48)  -> gold_block
+sphere blue     rgb(13,105,172)  -> cyan_concrete
+```
+
+The palette RGB values are eyeballed approximations, not sampled from game
+assets. Replace the whole thing with `--palette palette.json` in the form
+`{"block_name": [r, g, b]}`.
+
+## Options
+
+```
+--out <file>          output path (default: input path with .schematic)
+--scale <n>           studs per block (default 1)
+--format mcedit|sponge  .schematic (legacy) or .schem (Sponge v2)
+--palette <f.json>    replace the colour palette
+--alpha <n>           skip parts with Transparency above this (default 0.5)
+--no-collide          skip CanCollide=false parts
+--no-slabs            full cubes only, no half-height detection
+--flip                mirror the build along Z
+--bounds x1,y1,z1,x2,y2,z2   only convert this region, in studs (Y-up)
+--max-cells <n>       refuse places above this cell count (default 8,000,000)
+--info                report what would be converted, write nothing
+```
+
+### Picking a scale
+
+`--scale 1` (one stud per block) preserves all stud-level detail and makes the
+build roughly 2.8x Minecraft scale, since a Roblox character is ~5 studs against
+Minecraft's 1.8 blocks. `--scale 3` is close to player-proportional but drops
+1-stud detail entirely. Default is 1, because most Roblox builds are already
+blocky and detail loss is more noticeable than scale.
+
+## Limitations
+
+- **Binary `.rbxl` / `.rbxm` are refused, not parsed.** The binary format stores
+  properties column-wise in LZ4 chunks with interleaved encoding and varies by
+  version. Save XML from Studio instead: File → Save to File As → `.rbxlx`.
+- **Unions are skipped.** `UnionOperation` geometry is baked into an opaque
+  blob. In Studio you can right-click → Separate and re-save to recover the
+  source parts.
+- **MeshParts are skipped** — geometry lives in external assets.
+- **Terrain is skipped** — a compressed voxel grid, not parts.
+
+Those last three are the same failure as bezier patches in Quake 3, props in
+Source, static meshes in UT2004 and XModels in CoD4: geometry that lives outside
+the readable structure cannot be voxelized.
