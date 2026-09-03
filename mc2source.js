@@ -334,6 +334,11 @@ const M = {
     coal_block: 'CONCRETE/CONCRETEFLOOR004A',
     quartz_block: 'TILE/TILEFLOOR001A',
     planks: 'WOOD/WOODWALL009A',
+    wooden_slab: 'WOOD/WOODWALL009A',
+    oak_stairs: 'WOOD/WOODWALL009A', spruce_stairs: 'WOOD/WOODWALL009A',
+    birch_stairs: 'WOOD/WOODWALL009A', jungle_stairs: 'WOOD/WOODWALL009A',
+    acacia_stairs: 'WOOD/WOODWALL009A', dark_oak_stairs: 'WOOD/WOODWALL009A',
+    purpur_block: 'TILE/TILEFLOOR002A', purpur_slab: 'TILE/TILEFLOOR002A',
     log: 'WOOD/WOODWALL006A',
     leaves: 'NATURE/BLENDGRASSDIRT001A',
     bookshelf: 'WOOD/WOODWALL013A',
@@ -951,7 +956,11 @@ function writeObj(file, boxes, names, toWorld, isOpaqueAt) {
   return file;
 }
 
-try { main(); } catch (e) {
-  console.error('error: ' + e.message);
-  process.exit(1);
+module.exports = { LEGACY_NAMES, COLORS, COLORED, WOOD, M, SKIP, TRANSPARENT, decompress, NBTReader, loadSchematic, legacyName };
+
+if (require.main === module) {
+  try { main(); } catch (e) {
+    console.error('error: ' + e.message);
+    process.exit(1);
+  }
 }
