@@ -596,3 +596,82 @@ blocky and detail loss is more noticeable than scale.
 Those last three are the same failure as bezier patches in Quake 3, props in
 Source, static meshes in UT2004 and XModels in CoD4: geometry that lives outside
 the readable structure cannot be voxelized.
+
+---
+
+# wad2mc
+
+Doom and Doom II maps from a `.wad` into a Minecraft schematic.
+
+```bash
+node wad2mc.js doom2.wad --list
+node wad2mc.js doom2.wad --map MAP01 --scale 32 --out map01.schematic
+```
+
+Requires `vmf2mc.js` and `mc2source.js` alongside it.
+
+## Columns, not volumes
+
+Doom has neither brushes nor primitives. Its geometry is 2.5D: every **sector**
+is a polygon footprint with a floor height and a ceiling height. So this is a
+column problem. For each grid column: find the sector containing it, fill solid
+below the floor, air between floor and ceiling, solid above.
+
+That makes it the cheapest conversion here — no plane intersection, no
+containment tests, no subsampling. Sector floor and ceiling flats give
+materials directly, and one-sided linedefs are rasterized into columns to
+texture the walls.
+
+## Two problems worth knowing about
+
+**Finding the sector.** Doom already ships the answer: the `NODES` lump is a BSP
+tree built for exactly this query, traversed here the way the engine does it
+(`R_PointOnSide`, front child when the cross product is negative, high bit
+marking a subsector leaf). ZDoom extended nodes (`XNOD`/`ZNOD` magic) are
+detected and fall back to ray casting.
+
+**Deciding what is outside the map.** A BSP partitions *all* of space, so it
+reports a sector for points well outside the level — Doom never asks, because
+the player cannot leave. Without a separate inside test every column resolves to
+a sector and the map has no exterior at all.
+
+The inside test is even-odd crossings against the linedefs, computed once per
+row as a scanline rather than per cell. Critically it counts **one-sided
+linedefs only**: a two-sided line separates two sectors, so counting it flips
+parity and reads the far room as void.
+
+## Options
+
+```
+--list                list the maps in the wad and exit
+--map <name>          which map to convert (E1M1, MAP07, ...)
+--out <file>          output path (default: map name + .schematic)
+--scale <n>           Doom units per block (default 32)
+--format mcedit|sponge  .schematic (legacy) or .schem (Sponge v2)
+--blocks <f.json>     texture substring -> block name overrides
+--pad <n>             blocks of rock around the map bounds (default 2)
+--shell <n>           keep only n blocks of rock around open space (default 3)
+--no-sky-open         cap F_SKY1 ceilings instead of leaving them open
+--max-cells <n>       refuse maps above this cell count (default 8,000,000)
+--mirror              flip the map along the Y axis
+--info                report what would be converted, write nothing
+```
+
+A Doom player is 56 units tall, so `--scale 32` is close to Minecraft
+proportions. `--scale 16` keeps detail — 64-unit doorways become 4 blocks wide
+instead of 2 — at eight times the cell count.
+
+Hexen-format maps (those with a `BEHAVIOR` lump) are detected; their linedefs
+are 16 bytes and things 20 rather than 14 and 10.
+
+## Limitations
+
+- **No room over room.** Doom sectors do not stack, so neither does the output.
+  This is a limit of the format, not the converter.
+- **Things become nothing.** Monsters, items and player starts are counted and
+  reported but not placed.
+- **Flats and wall textures are approximated by name.** Doom texture names are
+  cryptic (`STARTAN3`, `RROCK19`, `SP_HOT1`), so the keyword rules are a starting
+  point — use `--blocks` to correct them.
+- **Sky is treated as open air**, which is usually what you want for outdoor
+  areas but does mean those rooms have no roof.
