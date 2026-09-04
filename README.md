@@ -675,3 +675,72 @@ are 16 bytes and things 20 rather than 14 and 10.
   point — use `--blocks` to correct them.
 - **Sky is treated as open air**, which is usually what you want for outdoor
   areas but does mean those rooms have no roof.
+
+---
+
+# bsp2mc
+
+Compiled GoldSrc and Source maps straight into a Minecraft schematic, with no
+decompilation step.
+
+```bash
+node bsp2mc.js de_dust2.bsp --info
+node bsp2mc.js cs_office.bsp --scale 32 --out office.schematic
+```
+
+Requires `vmf2mc.js` and `mc2source.js` alongside it.
+
+## The two formats need different strategies
+
+**Source (VBSP)** keeps real brushes. `LUMP_BRUSHES` (18) and `LUMP_BRUSHSIDES`
+(19) survive compilation, so brush planes feed straight into the shared
+half-space voxelizer — slab and stair reconstruction included.
+
+**GoldSrc (v30) does not.** Brushes are discarded at compile time; the format
+has 15 lumps and none of them is a brush lump. This is exactly why GoldSrc
+decompilers are lossy — they *reconstruct* brushes from the tree, and get it
+wrong often enough that a decompiled `.map` frequently isn't the map you think
+it is.
+
+Voxelization doesn't need brushes though. It needs "is this point solid", and
+the BSP tree answers that exactly, the same way the engine's collision code
+does: descend from the model's headnode, test the point against each node's
+plane, and read `contents` off the leaf you land in. Solid, empty, water, slime,
+lava, sky — all directly available.
+
+So GoldSrc geometry is sampled through the tree at 8 subsamples per cell, and
+surface textures come from rasterizing the `FACES` lump: each face polygon is
+sampled and pushed half a cell along `-normal` to tag the solid cell behind it.
+
+Covers Half-Life, Counter-Strike 1.6, Team Fortress Classic, Day of Defeat, and
+Quake 1 (v29) on the GoldSrc side; CS:S, HL2, TF2 and friends on the Source side.
+
+## Options
+
+```
+--out <file>          output path (default: map name + .schematic)
+--scale <n>           map units per block (default 32)
+--format mcedit|sponge  .schematic (legacy) or .schem (Sponge v2)
+--blocks <f.json>     texture substring -> block name overrides
+--liquids solid|skip  keep water/slime/lava volumes (default solid)
+--clip                include clip brushes (Source only)
+--no-slabs            full cubes only, no half-height detection
+--bounds x1,y1,z1,x2,y2,z2   only convert this region, in map units
+--max-cells <n>       refuse maps above this cell count (default 8,000,000)
+--mirror              flip handedness
+--info                report what would be converted, write nothing
+```
+
+## Limitations
+
+- **Displacements are still lost** on Source maps. They live in `LUMP_DISPINFO`
+  as displaced surfaces, not brush volumes. The count is reported.
+- **Static props are still lost** — `.mdl` files referenced from the entity
+  lump, not geometry in the bsp. Same as every other converter here.
+- **LZMA-compressed lumps are refused.** Console and packed bsps set a non-zero
+  `fourCC`; only uncompressed PC maps are handled, with a clear error otherwise.
+- **GoldSrc surface texturing is approximate.** Faces tag the cell behind them,
+  so a cell touched by two faces takes whichever it saw first. Interior rock
+  with no face nearby stays plain stone.
+- **IBSP files are rejected with a pointer** to `pk32mc.js` (Quake 3) or
+  `map2mc.js` (Call of Duty), since all three share the magic.
