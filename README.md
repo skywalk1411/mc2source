@@ -743,4 +743,149 @@ Quake 1 (v29) on the GoldSrc side; CS:S, HL2, TF2 and friends on the Source side
   so a cell touched by two faces takes whichever it saw first. Interior rock
   with no face nearby stays plain stone.
 - **IBSP files are rejected with a pointer** to `pk32mc.js` (Quake 3) or
-  `map2mc.js` (Call of Duty), since all three share the magic.
+  `cod2mc.js` (Call of Duty 1/UO), since all three share the magic.
+
+
+---
+
+# cod2mc
+
+Call of Duty 1 / United Offensive `.pk3` (or a bare `.bsp` / `.d3dbsp`) into a
+Minecraft schematic.
+
+```bash
+node cod2mc.js cod2_mp_carentan.pk3 --list   # which maps are inside
+node cod2mc.js cod2_mp_carentan.pk3 --info   # size check, writes nothing
+node cod2mc.js cod2_mp_carentan.pk3          # -> cod2_mp_carentan.schematic
+```
+
+Requires `vmf2mc.js` (voxelizer) and `pk32mc.js` (zip reader) in the same
+folder.
+
+```
+map            cod2_mp_carentan (IBSP v59, Call of Duty 1/UO)
+brushes        70243 used; skipped 10 sky, 1198 clip, 3 tool, 1553 non-solid, 0 degenerate
+bounds         4836 x 7545 x 1048 units
+grid at 32u    151 x 33 x 236 = 1,175,988 cells
+spawns         102 spawn entities
+surface mats   50 caulk-only brushes textured from the render mesh, 12 of them sampled per column
+fill           24.55% of the grid
+filled         288,683 blocks (6,752 slabs, 1,749 stairs)
+```
+
+## Why this needs its own reader
+
+Call of Duty reuses Quake 3's `IBSP` magic, so `pk32mc.js` opens the file and
+then refuses it. It is right to. Three things differ, and each one alone turns a
+Q3 parse into silent garbage:
+
+| | Quake 3 (v46) | Call of Duty 1/UO (v59) |
+|---|---|---|
+| Lump directory | 17 entries, `(offset, length)` | 33 entries, **`(length, offset)`** — the fields are swapped |
+| Brush | 12 bytes, with a `firstSide` index | 4 bytes, `{u16 numSides; u16 material}`, sides implicit |
+| First 6 brushsides | plane indices | **raw floats** — `minX maxX minY maxY minZ maxZ` |
+| Visible surfaces | on the brushsides | in the trisoup lump; brushes are collision-only |
+
+Sides 6.. *are* plane indices, and those planes are outward-facing exactly as in
+Q3, so once a brush is unpacked the shared voxelizer takes it unchanged — the
+same negate-to-inward trick `pk32mc` already does.
+
+Note that a map's filename says nothing about its format: `cod2_mp_carentan` is
+a CoD**1** v59 file. Check the version, not the name.
+
+### Verified, not assumed
+
+A misread lump table produces plausible-looking rubbish, so every structural
+claim above was checked against a real map first:
+
+- the 33-entry table packs contiguously and the last lump ends **exactly** at
+  EOF (11,992,792 bytes);
+- `sum(numSides)` over all 8255 brushes equals the **84222** brushsides in the
+  lump, confirming sides are consecutive with no index;
+- bounds decoded from the 6 axial floats reproduce model 0's stored bounding box
+  **exactly** (`-4096,-4608,-1024 .. 4864,7680,3584`), and that ordering is the
+  only one of four candidates that leaves all 8255 brushes non-inverted;
+- all 1462 trisoups have in-range vertex and index spans that land precisely on
+  the ends of both arrays.
+
+## Materials
+
+CoD encodes the surface type in the texture name itself —
+`textures/cod2/rock@v_stonewall_01` — so the prefix before `@` (`rock`, `wood`,
+`metal`, `brick`, `plaster`, `glass_nosight`, …) picks the block. That beats
+keyword-guessing the artist's name, which is what `pk32mc` has to do. Names
+without an `@` fall through to keyword rules, then to `--blocks` overrides.
+
+### The caulk problem
+
+CoD brushes carry **collision only**; what you actually see is the triangle
+soup. So a brush whose every side is `caulk` — the ground slab, the terrain
+base, the sealing hull — has no texture to go on. On Carentan those are just 130
+brushes but **85% of the filled volume**, and left alone they turn the whole map
+into featureless stone.
+
+`cod2mc` reads their material from the render mesh laid over them instead:
+
+- **Per column, not per brush.** A ground slab spans the entire map, so one
+  material for the whole thing collapses every road, courtyard and field into a
+  single block. A wide box-shaped collision brush is cut into one column per
+  output block and sampled separately.
+- **Triangles, not vertices.** Terrain triangles are often hundreds of units
+  across, so sampling vertices misses most columns — a 32-unit column usually
+  contains none. Lookups project the triangle to XY, test containment, and
+  interpolate the height, taking whichever surface sits closest to the brush
+  top.
+- **Only the top block is skinned.** Ground slabs are metres thick; skinning all
+  of it in grass drowns the map. What is buried becomes dirt under soft ground,
+  otherwise the `--nodraw-block`.
+
+Turn the whole pass off with `--no-surface-materials`.
+
+## Options
+
+```
+--out <file>          output path (default: map name + .schematic)
+--map <name>          which bsp to use when the pk3 holds several
+                      (full path, "name.bsp" or bare name all work)
+--list                list the bsp files inside the pk3 and exit
+--scale <n>           CoD units per block (default 32; a CoD player is ~60
+                      units tall, so 32 is roughly Minecraft-proportioned)
+--format mcedit|sponge  .schematic (legacy) or .schem (Sponge v2)
+--blocks <f.json>     texture substring -> block name overrides
+--liquids solid|skip  keep water/lava brushes (default solid)
+--clip                also voxelize clip brushes (invisible collision)
+--world-only          only model 0; skips doors and other movers
+--no-slabs            full cubes only, no half-height detection
+--no-surface-materials  do not borrow materials from the render mesh for
+                      collision-only (all-caulk) brushes
+--max-tiles <n>       most per-column tiles to cut one wide ground brush into
+                      when sampling its materials (default 40000)
+--nodraw-block <name> block for brushes with no drawable surface (stone)
+--bounds x1,y1,z1,x2,y2,z2   only convert this region, in CoD units
+--max-cells <n>       refuse maps above this cell count (default 8,000,000)
+--mirror              flip handedness
+--info                report what would be converted, write nothing
+```
+
+## What gets filtered
+
+| Category | Handling |
+|---|---|
+| `CONTENTS_SOLID` | converted |
+| `SURF_SKY` | skipped — the outer shell, same role as `toolsskybox` |
+| `common/clip`, `common/nosight` | skipped unless `--clip` |
+| `common/trigger`, `hint`, `origin`, `portal` | skipped |
+| `CONTENTS_WATER` / `LAVA` | converted to water / lava, or `--liquids skip` |
+| all-`caulk` solid brushes | kept, textured from the render mesh |
+
+## Limitations
+
+- **xmodels are lost.** Carts, rubble, furniture, foliage and most map clutter
+  are `.xmodel` props referenced from the entity lump, not geometry in the bsp.
+  Same class of loss as static props everywhere else here, but CoD leans on them
+  far more heavily than Quake does, so expect a bare-boned town.
+- **Only IBSP v59.** CoD2 (v4) and CoD4 (v22) rearranged the lumps again and
+  each need their own reader; both are refused by name rather than misparsed.
+- **Curved / patch collision is ignored** — only brush volumes are voxelized.
+- **Brush entity behaviour is lost.** Doors and movers become static blocks
+  wherever they sat at compile time.

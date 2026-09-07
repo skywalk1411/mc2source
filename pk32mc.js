@@ -95,8 +95,13 @@ function parseBsp(buf) {
     throw new Error(
       `this is a ${COD[version]} .d3dbsp (IBSP v${version}), not a Quake 3 BSP.\n` +
       '       CoD reuses the IBSP magic but rearranges the lumps, so parsing it\n' +
-      '       as Q3 would produce garbage. Convert the Radiant source instead:\n' +
-      '         node map2mc.js yourlevel.map');
+      '       as Q3 would produce garbage.\n' +
+      (version === 59
+        ? '       Convert it with cod2mc.js, which reads this format directly:\n' +
+          '         node cod2mc.js yourmap.pk3'
+        : '       cod2mc.js reads CoD1/UO (v59) only; this version needs its own\n' +
+          '       reader. Failing that, convert the Radiant source:\n' +
+          '         node map2mc.js yourlevel.map'));
   }
   if (version !== 46 && version !== 47)
     console.warn(`warning: BSP version ${version}, expected 46 (Q3A). Trying anyway.`);
