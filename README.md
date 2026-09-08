@@ -1135,3 +1135,261 @@ and if a real map trips one of the checks above, that is the check doing its job
 - **Steep slopes near the grid limit are approximate.** Above about heinum 4096
   (45°) the surface can cross more than one cell per column, and only the cell
   the column centre lands in keeps its shape.
+
+
+---
+
+# halo2mc
+
+Halo: Combat Evolved `.map` cache files into a Minecraft schematic. Xbox,
+Gearbox PC and Custom Edition.
+
+```bash
+node halo2mc.js bloodgulch.map --list
+node halo2mc.js bloodgulch.map --info --explain
+node halo2mc.js bloodgulch.map --scale 0.4 --out bloodgulch.schematic
+node halo2mc.js a30.map --bsp 2 --scale 0.5
+```
+
+Requires `vmf2mc.js`. No other dependencies.
+
+```
+map            bloodgulch (PC / Custom Edition, build 01.00.00.0609)
+tags           1489, 1489 with readable paths, classes stored reversed
+bsp            0 of 1: levels\test\bloodgulch\bloodgulch
+collision      14204 nodes, 8891 planes, 6312 leaves, 11077 surfaces
+materials      27 shader(s) resolved through the tag index
+solid side     no-leaf, from 14 probes outside the world (unanimous)
+bounds         131.2 x 128.9 x 22.6 world units (1 wu = 10 feet)
+grid at 0.4wu  328 x 57 x 322 = 6,020,592 cells
+```
+
+## Halo has no brushes
+
+Level geometry is authored as a triangle mesh and compiled, so on the face of
+it this is the mesh problem the rest of this project doesn't solve. Except the
+compiler also emits a **collision BSP** — a tree of dividing planes with convex
+leaves — and that is exactly the structure `bsp2mc` already classifies GoldSrc
+through. Voxelization does not need geometry, it needs "is this point solid",
+and a BSP tree answers that exactly. So this is `bsp2mc`'s GoldSrc strategy
+pointed at a completely different engine's tree, and the 8-subsamples-per-cell
+shape logic comes across unchanged.
+
+The two things Halo adds are that the tree lives inside a *tag cache* rather
+than a flat lump table, and that the whole thing has to be found without
+trusting a single offset.
+
+## Nothing here trusts a hardcoded offset
+
+The cache format is documented by the community — c20 and Invader between them
+cover it thoroughly — but I had no retail map to check any specific offset
+against, and a wrong offset in a tag struct does not produce an error. It
+produces plausible garbage. Every other converter in this project could be
+checked against something: Build's `heinum 4096 == 45°`, the GRP directory
+landing exactly on EOF, the ART pixel accounting. Halo offered nothing
+equivalent.
+
+So the reader was built the other way round. **Every structure is located by
+search and then confirmed against invariants that arbitrary data cannot
+satisfy**, and where a convention could go either way it is derived from the
+file rather than assumed. `--explain` prints the whole chain:
+
+```
+how this was located:
+  tag base     derived: tagArrayPointer - 40 = 0x40440000
+  bsp ref      found at file offset 2860, mapped at 0x50000000
+  bsp header   pointer at 2048 rebases to 2064, as predicted
+  collision    element at 2108, all indices in range, blocks contiguous
+```
+
+### The memory base is solved, not looked up
+
+Tag data is mapped to a fixed address, so pointers inside it need rebasing. That
+base differs between Xbox and PC and I could not verify either constant, so it
+is not used. The first field of the tag index header is a pointer to the tag
+array, and the tag array begins immediately after that 40-byte header:
+
+```
+rebase(tagArrayPointer) == tagIndexOffset + 40    =>    base = tagArrayPointer - 40
+```
+
+One equation, one unknown, engine-independent. Confirmed by the `tags`
+signature landing where the arithmetic predicts and by every tag path rebasing
+to printable text — a wrong entry stride produces junk paths immediately.
+
+### Byte order is two questions, not one
+
+The header signature and the file's endianness are separate, and answering the
+first does not answer the second: `head` written as a little-endian integer
+lands in the file as `daeh`. The reader accepts the signature either way, then
+settles endianness on evidence — read the offsets both ways and keep the
+reading in which the tag data actually fits inside the file. Only one can be
+right, and the wrong one misses by megabytes. A genuinely big-endian cache is
+an Xbox 360 map and gets refused by name.
+
+The same applies to fourCC order in tag classes: rather than assume they are
+stored reversed, both orders are tried and the one that yields a scenario tag at
+the id the index header points at wins.
+
+### The BSP is found by shape, then cross-checked
+
+A scenario's structure BSP reference is a 32-byte record: two file offsets, a
+mapping address, four zero bytes, then a tag reference whose class is `sbsp` and
+whose id resolves to a tag that really is an `sbsp`. Scanning for that shape
+finds it without indexing the scenario tag at all.
+
+Then the *independent* check: the record says the BSP data starts at some
+offset, and the header there must contain a pointer that rebases to exactly 16
+bytes past itself, plus its own `sbsp` signature. Two unrelated parts of the
+file agreeing on the same address is what makes it safe.
+
+### The collision BSP is confirmed by index ranges
+
+A `collision_bsp` element is eight consecutive tag blocks — node tree, planes,
+leaves, the 2D structures, then the surface/edge/vertex mesh — so 96 bytes of a
+very particular shape. Shape alone would eventually produce a false positive, so
+each candidate is loaded and every cross-reference is range-checked: each node's
+plane index against the plane count, each child against the node and leaf
+counts, each surface's first edge against the edge count, each edge's vertices
+against the vertex count, and every plane normal for unit length.
+
+Thousands of indices all landing in range cannot happen by chance, and it
+simultaneously confirms every element size — a wrong stride desynchronises and
+the indices go wild within a few records. Corrupting one node's plane index is a
+test case, and the candidate is correctly rejected rather than misparsed. Block
+contiguity is checked too and reported, as one more independent confirmation
+when it holds.
+
+## Which side of the tree is solid
+
+Descend the tree, positive side of each plane to the front child. Landing on a
+leaf means one thing and landing on `-1` means the other — and getting that
+backwards turns a level inside out while looking perfectly plausible in the
+statistics.
+
+So it is measured. Fourteen probe points well outside the level's bounding box:
+a Halo BSP is a sealed world, so every one of them is outside it, and whichever
+class they land in is by definition the class that is not the playable interior.
+The test suite builds the same level twice, once with the tree polarity
+inverted, and asserts the two conversions come out **byte-identical** rather
+than as each other's negative.
+
+The same reasoning applies to surface normals. Rather than trust the sign bit on
+a surface's plane index, each face is probed on both sides and the direction
+that is actually solid is the one used. A face where both sides agree is skipped
+rather than guessed at.
+
+## Materials
+
+Each collision surface carries a material index into the BSP's
+`collision_materials`, whose elements are tag references to shaders. In a cache
+file the reference's name pointer is dead and only the tag id means anything, so
+the id is resolved through the tag index to recover the shader's path — and
+`levels\a30\shaders\rock_ground` is a *name*, which the keyword tables in this
+project already know what to do with.
+
+That block is found by search like everything else, and its signature is strong:
+a run of 20-byte records whose first four bytes are a shader class and whose tag
+ids all resolve. Random data does not contain runs of valid tag ids.
+
+```bash
+echo '{"rock_ground":"andesite","cliff":"stone","panel":"iron_block"}' > blocks.json
+node halo2mc.js bloodgulch.map --blocks blocks.json
+```
+
+Keys match anywhere in the shader path, case-insensitively. Unmatched shaders
+are listed with a cell count at the end of the run.
+
+## Scale
+
+A Halo world unit is 10 feet, so this is the first converter here where the
+source unit is *bigger* than a Minecraft block and `--scale` is a fraction. The
+default of `0.4` puts a Spartan at about 1.75 blocks, which is roughly Minecraft
+height, and keeps a full multiplayer map comfortably inside the cell budget.
+
+Unlike `build2mc` there is nothing in the file to measure this from — Halo's
+world unit is a documented engine constant rather than something the map header
+records — so this is asserted rather than derived, and it is the one number in
+this converter that is.
+
+## Sealed worlds and the shell
+
+A Halo BSP is a sealed mesh, which means everything that is not the playable
+interior is solid — including all the space around and above the level. Without
+trimming, the output is a large cube with a level-shaped hole in it. Same
+situation `t3d2mc` hits with Unreal's subtractive worlds, and the same fix:
+`--shell 3` keeps three blocks of solid around any open space and discards the
+rest. `--no-shell` keeps the cube if you want it.
+
+## Options
+
+```
+--bsp <n>             which structure BSP to convert (default 0)
+--out <file>          output path (default: BSP tag name + .schematic)
+--scale <n>           world units per block (default 0.4)
+--format mcedit|sponge  .schematic (legacy) or .schem (Sponge v2)
+--blocks <f.json>     shader path substring -> block, {"rock":"andesite"}
+--default-block <n>   block for shaders no rule matched (stone)
+--shell <n>           keep only n blocks of solid around open space (default 3)
+--no-shell            keep the full solid
+--no-slabs            full cubes only; no slope reconstruction
+--max-cells <n>       refuse maps above this cell count (default 8,000,000)
+--mirror              flip handedness
+--list                list the structure BSPs and exit
+--info                report what would be converted, write nothing
+--explain             also show how each structure was located and confirmed
+```
+
+## Verified, not assumed — and what that does not cover
+
+The test suite builds a structurally valid cache file from scratch: header, tag
+index with derived base, a scenario carrying a structure BSP reference, an sbsp
+region with `collision_materials` and a real seven-node collision tree
+describing a room with a sloping floor. It then checks that every structure is
+found **by search alone**, that the memory base comes out as the exact constant
+the fixture used, that a corrupted node index is rejected rather than misparsed,
+that inverted tree polarity produces an identical level, and that the ramp comes
+out as a staircase:
+
+```
+10 ##..................................................##
+ 9 .#ss................................................##
+ 8 ..#####ssss.........................................##
+ 7 ....#########Ssss...................................##
+ 6 ...........#########Ssss............................##
+ 5 .................##########ssss.....................##
+ 4 ........................#########Ssss...............##
+ 3 ...............................#########Ssss........##
+ 2 .....................................##########ssss.##
+```
+
+**None of this has touched a retail Halo map.** A synthetic fixture proves the
+reader is self-consistent; it cannot prove the struct layouts match Bungie's,
+because I wrote the fixture from the same understanding the reader uses. What it
+does prove is that when the understanding is wrong, the reader says so instead
+of producing a level-shaped lie — which is why the searching and the range
+checks are there at all. Run it on a real map with `--explain`, and if a check
+fires, that is the design working.
+
+## Limitations
+
+- **One BSP at a time.** Halo can only have a single BSP loaded, so a campaign
+  level is split across several and each converts separately. `--list` shows
+  them; the converter warns when it silently used the first of many.
+- **Collision, not render, geometry.** The playable surface is exact, but
+  collision is a simplification of the visible mesh. Detail geometry that was
+  never collidable is not there.
+- **Phantom BSP converts faithfully.** Some stock maps ship with invisible
+  collision extensions near nearly-coplanar faces — invisible in Halo, very
+  visible in Minecraft. Danger Canyon is the known example.
+- **No objects.** Scenery, vehicles, weapons, machines and doors live in
+  separate tags with their own collision models and are not placed. A converted
+  level is bare architecture.
+- **Interior fill is untextured.** Only cells a collision surface touches get a
+  shader; anything deeper is `--default-block`. Same behaviour `bsp2mc`
+  documents for GoldSrc.
+- **Halo 2 onward are not supported.** Halo 2 Vista is a different tag layout.
+  Halo 3, ODST and Reach on 360 are big-endian with per-build layouts. Their MCC
+  releases are `.module` archives with proprietary compression. Halo 1 MCC maps
+  use a different header and are not handled either. All are refused by name
+  rather than half-read.
