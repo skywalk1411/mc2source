@@ -99,7 +99,7 @@ function readHeader(B) {
 
   // Version tells us the engine, but it is only a label - nothing below depends
   // on it, because everything below is derived rather than looked up per engine.
-  h.engine = { 5: 'Xbox', 7: 'PC / Custom Edition', 609: 'Demo' }[h.version] || `unknown (${h.version})`;
+  h.engine = { 5: 'Xbox', 6: 'Demo', 7: 'PC (retail)', 609: 'Custom Edition' }[h.version] || `unknown (${h.version})`;
   return h;
 }
 
@@ -120,7 +120,10 @@ function readHeader(B) {
  * where it should and by every tag path rebasing to printable text.
  * ------------------------------------------------------------------ */
 
-const TAGS_SIG = 0x73676174;                   // "tags" as stored
+// The fourCC is stored reversed in the file ("sgat"), the same way tag classes
+// are ("rncs" for scnr). Which end it is written from is exactly the kind of
+// convention this file does not assume, so accept either.
+const TAGS_SIG = 0x73676174, TAGS_SIG_REV = 0x74616773;   // "tags" / "sgat"
 const TAG_ENTRY = 32, INDEX_HEADER = 40;
 
 function readTagIndex(B, h) {
@@ -130,7 +133,7 @@ function readTagIndex(B, h) {
   const tagCount = B.readUInt32LE(o + 12);
   const sig = B.readUInt32LE(o + 36);
 
-  if (sig !== TAGS_SIG)
+  if (sig !== TAGS_SIG && sig !== TAGS_SIG_REV)
     throw new Error('no "tags" signature at the end of the tag index header - either this is ' +
       'not a Halo 1 cache or the header layout differs from the one this reader expects');
   if (tagCount === 0 || tagCount > 65535)
@@ -232,14 +235,24 @@ function findStructureBsps(B, h, idx) {
     const tag = byId.get(tagId);
     if (!tag || tag.cls !== 'sbsp') continue;
 
-    // Header cross-check: header[0] must rebase to header end.
+    // Header cross-check: the BSP data opens with a small header that ends in
+    // an sbsp fourCC and whose first field points at its own end. Its length is
+    // not the same across engines, so don't assume one - accept whichever
+    // length makes BOTH facts true at once. Two independent agreements on the
+    // same boundary is the check; the length itself is just what falls out.
     const rebase = (q) => q - magic + start;
     const hdrPtr = B.readUInt32LE(start);
-    if (rebase(hdrPtr) !== start + 16) continue;
-    if (B.compare(SBSP, 0, 4, start + 12, start + 16) !== 0) continue;
+    let hdrSize = 0;
+    for (let n = 8; n <= 64; n += 4) {
+      if (start + n > B.length) break;
+      if (rebase(hdrPtr) !== start + n) continue;
+      if (B.compare(SBSP, 0, 4, start + n - 4, start + n) !== 0) continue;
+      hdrSize = n; break;
+    }
+    if (!hdrSize) continue;
 
-    found.push({ start, size, magic, rebase, tag, refAt: p,
-      dataStart: start + 16, dataEnd: start + size });
+    found.push({ start, size, magic, rebase, tag, refAt: p, hdrSize,
+      dataStart: start + hdrSize, dataEnd: start + size });
   }
   // The same BSP can be referenced more than once; keep one of each.
   const seen = new Set();
