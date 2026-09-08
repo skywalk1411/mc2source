@@ -889,3 +889,249 @@ Turn the whole pass off with `--no-surface-materials`.
 - **Curved / patch collision is ignored** — only brush volumes are voxelized.
 - **Brush entity behaviour is lost.** Doors and movers become static blocks
   wherever they sat at compile time.
+
+
+---
+
+# build2mc
+
+Build engine levels into a Minecraft schematic. Covers **Duke Nukem 3D**,
+**Shadow Warrior**, **Redneck Rampage**, **Ion Fury**, **NAM** and **WW2 GI** —
+anything shipping a plain v7 `.MAP`, loose or inside a `.GRP`.
+
+```bash
+node build2mc.js DUKE3D.GRP --list
+node build2mc.js DUKE3D.GRP --map E1L1 --info
+node build2mc.js DUKE3D.GRP --map E1L1 --scale 128 --out e1l1.schematic
+node build2mc.js MYLEVEL.MAP --scale 64 --sprites
+```
+
+Requires `vmf2mc.js` (voxelizer and schematic writers). `rbxl2mc.js` is optional
+and enables tile colour matching.
+
+```
+map            E1L1 (Build v7, 412 sectors, 2894 walls)
+slopes         37 sector(s) with a sloped floor or ceiling
+sprites        1105 total, 288 wall/floor-aligned
+tiles          1493 from 5 ART file(s), colour-matched in Oklab
+extent         49152 x 40960 units, world z -1536 to 2304
+scale          player eye sits 512 units up -> suggested --scale 256
+grid at 128u   386 x 32 x 322 = 3,977,344 cells
+sky            29 sector(s) with a parallaxing ceiling (left open)
+```
+
+## This is wad2mc evolved
+
+Build geometry is 2.5D like Doom's — every sector is a polygon footprint with a
+floor height and a ceiling height — so it is the same column problem. Two things
+differ, and both are improvements.
+
+**Sectors carry their own wall loops.** "Which sector contains this point" is a
+direct even-odd test against that sector's own walls, and inner loops (holes)
+sit in the same wall range as the outer loop, so they fall out for free. Doom
+needed a BSP traversal *and* a separate inside test, because its `NODES` lump
+partitions all of space and happily reports a sector for points outside the
+level. Here a point in no sector is outside the map by construction.
+
+**Floors and ceilings slope.** This is the interesting part. `floorheinum`
+tilts the plane about the sector's first wall, so floor height is a linear
+function of (x, y) rather than a constant. That means the surfaces can go
+through `vmf2mc`'s voxelizer instead of a scalar column fill — 8 subsamples per
+cell, quadrant occupancy masks read off to pick full cube, slab or stair. A
+Build ramp comes out as a real Minecraft staircase rather than Doom's flat
+plateaus:
+
+```
+ 7 .#####################.............#sS##.##################
+ 6 ..################.###...........sS####...################.
+ 5 ...................###........ss######.....................
+ 4 ...................###.....#sS#####........................
+ 3 ...................###...sS######..........................
+ 2 ....................##ss######.............................
+```
+
+The voxelizer takes an arbitrary containment `test`, which is exactly what a
+sloped sector surface can supply. No changes to it were needed.
+
+### Getting the slope right
+
+From Build's `getzsofslope()`, the offset at a point is
+`heinum * dmulscale3(...) / (length << 5)`. The numerator is the cross product —
+perpendicular distance times length — so the length cancels and the whole thing
+reduces to `heinum * perpdist / 256` in z units. Build's z axis points down and
+is stored 16× finer than x and y, so dividing by 16 for world units gives a
+gradient of `heinum / 4096`.
+
+That is the documented result — heinum 4096 is a 45° slope — which is the check
+that the formula was transcribed correctly rather than merely plausibly. The
+test suite asserts it, along with the plane passing through zero along the pivot
+wall and the gradient halving when heinum halves.
+
+### One cell thick, then bulk
+
+Only the visible skin goes through the voxelizer: a shell one cell thick hugging
+each floor and ceiling, which is where all the slope detail lives and which
+keeps the brush bounding boxes small. Everything below a floor and above a
+ceiling is bulk rock with no shape to it, filled in a flat pass afterwards.
+
+That pass has to be slightly careful. A skin measured one cell down from the
+surface generally straddles *two* cells — the surface cell gets its lower part
+and the cell beneath gets the rest, which resolves to a top slab with a void
+under it and a floor two cells thick with a seam through it. So the fill indexes
+the cell the surface actually passes through and forces everything past it to a
+full cube, overwriting rather than filling gaps. Only the surface cell keeps its
+slab or stair shape.
+
+## Picking a scale
+
+Every other converter here states a player height from memory and divides. Build
+maps do not need that, and it is just as well, because Build's unit is small and
+the games that use the format do not agree about how small.
+
+The map header stores the player start, and the engine puts `posz` at *eye*
+height above the sector floor. So `--info` measures the scale out of the file:
+subtract the start sector's floor height — sloped or not — from the start z, and
+divide by Minecraft's 1.62-block eye height.
+
+The default of `--scale 128` is deliberately below whatever that comes out as.
+Proportional scale on a Build map throws away most of its detail, and the
+geometry sits on the editor's power-of-two grid, so a power-of-two scale aligns
+cleanly where a "true" scale of 197 would leave every surface ragged. Same trade
+`t3d2mc` makes choosing 32 over 44 for Unreal. The converter warns if `--scale`
+goes *above* proportional, since that is where doorways stop being walkable.
+
+## Materials: numbers, not names
+
+Every other converter here reads texture *names* and matches keywords. Build has
+none. A surface carries a `picnum` — a bare integer index into the ART files — so
+there is nothing to keyword-match, and guessing from tile ranges is per-game
+folklore that breaks on the next game.
+
+Instead, when `PALETTE.DAT` and the ART files are available — they are, if you
+point the converter at the GRP — each tile's average colour is computed through
+the VGA palette and matched against the Minecraft palette in **Oklab**. Same
+approach `rbxl2mc` uses for Roblox part colours, for the same reason: real
+colour beats guessed names.
+
+Two wrinkles worth knowing:
+
+- **Sloped surfaces match against a restricted palette.** Only blocks with both
+  a slab and a stair form — stone, cobblestone, bricks, stone bricks, sandstone,
+  quartz, planks. A wool ramp would flatten straight back into full cubes, and
+  the steps are worth more than the hue.
+- **`--blocks` overrides are taken at their word**, including on a slope. The
+  converter says so when an override flattens one.
+
+```bash
+echo '{"1234":"stone_bricks","300-360":"sand","770":"glass"}' > blocks.json
+node build2mc.js DUKE3D.GRP --map E1L1 --blocks blocks.json
+```
+
+Keys are a picnum or an inclusive `lo-hi` range. Without ART, everything falls
+through to `--blocks` and then `--default-block`.
+
+## Sprites
+
+Build sprites are billboards, but wall-aligned and floor-aligned ones are real
+level geometry — signs, catwalks, crates, the fences and grates that half of
+Duke3D's detail is made of. They are oriented quads rather than sectors, so they
+go through the voxelizer as oriented boxes, which is literally the containment
+shape `rbxl2mc` uses for Roblox parts. So this converter runs both paradigms at
+once: sector column volumes for the architecture, oriented primitives for the
+clutter.
+
+They are off by default because their world size is `tilesize * repeat / 4`,
+which needs the tile dimensions out of ART. With no ART loaded the size is
+unknowable, and sprites are skipped rather than guessed at — `--info` reports
+how many were passed over.
+
+```bash
+node build2mc.js DUKE3D.GRP --map E1L1 --sprites
+node build2mc.js DUKE3D.GRP --map E1L1 --sprites-blocking   # only cstat bit 0
+```
+
+## Verified, not assumed
+
+A wrong struct size does not produce an error, it produces plausible-looking
+rubbish, so every parse is checked against invariants the format guarantees
+before any of it is trusted:
+
+- the GRP directory packs contiguously and the last entry ends **exactly** at
+  EOF — the same check `cod2mc` runs on the CoD lump table;
+- ART headers account for every byte: the declared tile areas must sum to
+  exactly the pixel block that follows the header;
+- every sector's wall range lies inside the wall array, and the ranges normally
+  tile it in order (a map that breaks that is unusual but readable, so it is
+  reported rather than refused);
+- every `point2` stays inside its own sector's range, and the loops it forms are
+  closed and cover that range exactly once.
+
+The loop check is the strong one — following `point2` from a wrong offset walks
+off almost immediately. Feeding the reader a map shifted by one byte is a test
+case, and it is rejected.
+
+**These were verified against synthetic maps, not shipped ones.** The struct
+layouts and the slope formula are transcribed from the documented v7 format and
+Build's own `getzsofslope`, and the 45°-at-heinum-4096 identity is a real
+external check on the maths, but nothing here has been run against a retail
+`.GRP`. Treat the first conversion of a real level as the actual verification —
+and if a real map trips one of the checks above, that is the check doing its job.
+
+## Refused rather than misparsed
+
+- **Blood.** Its `.MAP` starts `BLM\x1a`, the header is encrypted, and the
+  sector and wall records carry Blood's XSECTOR/XWALL extensions. It is detected
+  and refused with a pointer at decrypting it first, rather than half-decoded.
+- **Map versions 5 and 6** predate the v7 struct layout. Re-save in Mapster32.
+- **eduke32 v8 and v9** keep the same three structs and append their extra data
+  after the sprite array, so the same reader covers them. The trailing bytes are
+  reported and not read — which means **TROR is lost**: a v9 map's stacked
+  sectors come through as the base layer only, because the bunch links live in
+  that trailing block.
+
+## Options
+
+```
+--list                list the maps inside a .grp and exit
+--map <name>          which map to convert (e.g. E1L1.MAP)
+--out <file>          output path (default: map name + .schematic)
+--scale <n>           Build units per block (default 128; --info measures the
+                      map's own player start and suggests one)
+--format mcedit|sponge  .schematic (legacy) or .schem (Sponge v2)
+--art <file.art>      load tile sizes and colours from a loose ART file
+                      (repeatable; found automatically inside a .grp)
+--palette <f.json>    replace the block colour palette: {"block":[r,g,b]}
+--blocks <f.json>     picnum -> block overrides, {"1234":"stone","10-40":"sand"}
+--default-block <n>   block for tiles with no colour and no override (stone)
+--rock-block <n>      block for bulk fill below floors and above ceilings (stone)
+--sprites             also voxelize wall- and floor-aligned sprites
+--sprites-blocking    ...but only the ones flagged blocking (cstat bit 0)
+--sprite-thickness <n>  how thick a sprite quad becomes (default half a block)
+--pad <n>             blocks of rock around the map bounds (default 2)
+--shell <n>           keep only n blocks of rock around open space (default 3)
+--no-sky-open         cap parallaxing ceilings instead of leaving them open
+--no-slabs            full cubes only; no slope reconstruction
+--max-cells <n>       refuse maps above this cell count (default 8,000,000)
+--mirror              flip handedness
+--info                report what would be converted, write nothing
+```
+
+## Limitations
+
+- **No room over room.** Build sectors do not stack in v7, so neither does the
+  output. Same format limit `wad2mc` hits. eduke32's TROR would lift it, and is
+  not read — see above.
+- **Face sprites become nothing.** Enemies, pickups, most decoration. They are
+  billboards with no orientation in the world, so there is nothing to voxelize.
+  Counted and reported.
+- **Sector effectors become static.** Doors, lifts, subways, rotating sectors
+  and the whole `lotag`/`hitag` scripting layer convert wherever the geometry
+  sat when the map was saved. Duke3D leans on moving sectors hard, so expect
+  closed doors and lifts parked at one end.
+- **Masked and one-way walls are solid.** A `nextsector >= 0` wall with a mask
+  texture — grates, railings, windows — is treated as the opening it sits in.
+- **Tile colour is an average.** A tile that is half dark brick and half bright
+  window averages to something that is neither. Correct it with `--blocks`.
+- **Steep slopes near the grid limit are approximate.** Above about heinum 4096
+  (45°) the surface can cross more than one cell per column, and only the cell
+  the column centre lands in keeps its shape.
